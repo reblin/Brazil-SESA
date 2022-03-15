@@ -1,0 +1,563 @@
+---
+title: "Brazil Analyses-Clean"
+output: html_notebook
+---
+
+
+```{r}
+# set timezone
+Sys.setenv(TZ = "GMT")
+
+library(car) # calls the correct libraries
+library(doBy) # a package that will allow you to quickly visualize the data within categories. It allows a bit more control than describeBy within psych 
+library(sciplot) # a new library that allows for quick interaction plots
+library(ggplot2)
+library(DescTools)
+library(psych)
+library(plyr)
+library(lattice)
+library(dplyr)
+library(emmeans)
+library(HH)
+library(gvlma)
+library(productplots)
+library(lubridate)
+library(dplyr)
+library(MASS)
+library(candisc)
+library(ICSNP)
+library(MANOVA.RM)
+library(betareg)
+library(vegan)
+library(outliers)
+library(lme4)
+library(reshape2)
+library(PMCMRplus)
+library(PMCMR)
+
+
+birbs<-read.csv("Brazil Motus 2019-2020.csv")
+#motus csv template 2019-2020 combined
+
+```
+
+Prepping Motus Data:
+```{r}
+#converting existing columns to time in excel
+birbs$Deploy.ts<-as.POSIXct(birbs$Deploy.ts,format='%m/%d/%Y %H:%M')
+birbs$Departure.ts<-as.POSIXct(birbs$Departure.ts, format='%m/%d/%Y %H:%M')
+birbs$final.ts<-as.POSIXct(birbs$final.ts, format='%m/%d/%Y %H:%M')
+
+```
+
+```{r}
+birbs$Size.Adjusted.Mass<-(birbs$weightGrams/(birbs$wingMillimeters^3))*10000
+
+birbs$Duration.Stay<-difftime(birbs$Departure.ts,birbs$Deploy.ts, units='days')
+
+birbs$tot.det<-difftime(birbs$final.ts,birbs$Deploy.ts, units='days')
+birbs$tot.det<-as.numeric(birbs$tot.det)
+birbs$log.det<-log10(birbs$tot.det)
+
+birbs$north.dur<-difftime(birbs$final.ts,birbs$Departure.ts, units='days')
+```
+
+
+```{r}
+hist(as.numeric(birbs$Duration.Stay), breaks=(50), main="Histogram of zduration of Stay")
+```
+
+
+```{r}
+#remove NAs and "toss"points (detected <4 days)
+birbs.reduced<-dplyr::filter(birbs, Duration.Stay > 4)
+birbs.reduced<-dplyr::filter(birbs.reduced, Strategy!="few")
+birbs.reduced<-dplyr::filter(birbs.reduced, Strategy!="NA")
+birb.test<-dplyr::filter(birbs, Duration.Stay < 4)
+#histogram of duration
+hist(as.numeric(birbs.reduced$Duration.Stay), breaks=30, main="Histogram of Duration of Stay")
+
+birbs.reduced$utcYearStart<-as.factor(birbs.reduced$utcYearStart)
+
+birbs.reduced<- birbs.reduced %>% dplyr::select(-mfgID,-dateBin,-tagProjectID,-tagDeployID,-period,-utcMonthStart,-utcDayStart,-utcHourStart,-utcMinuteStart,-deferSec,-bandNumber,-markerNumber,-markerType,-billMillimeters,-headMillimeters,-fatScore,-comments,-elevationMeters)
+```
+
+
+count strategies:
+```{r}
+stratcount<-plyr::count(birbs.strat, c("Strategy","utcYearStart"))
+print(stratcount)
+
+remcount<-plyr::count(birb.test, c("utcYearStart"))
+print(remcount)
+```
+
+means: 
+```{r}
+mean_and_var <- summaryBy(Duration.Stay ~ utcYearStart + Strategy, data=birbs.strat, FUN=c(mean,var,sd))
+mean_and_var 
+
+```
+
+
+Average time on tidal flat for birds on days they're using the tidal flats
+```{r}
+avg.tfl<-read.csv("daily.use.csv")
+```
+
+
+```{r}
+tfl.summary <-avg.tfl %>%
+  group_by(motusTagID,Strategy) %>%
+  dplyr::summarise(mean=mean(time.TF.hours), var=var(time.TF.hours))
+  
+```
+
+
+```{r}
+mean_and_varTFstrat <- summaryBy(mean ~ Strategy, data=tfl.summary, FUN=c(mean,var,sd))
+mean_and_varTFstrat 
+
+```
+
+Bill model:
+```{r}
+bill.fit1<- lm(billMillimeters~Strategy, data=birbs.reduced)
+
+Anova(bill.fit1, type="II") # generates a typical summary of the output.
+
+
+resid.bill1=resid(bill.fit1) # generating residuals
+
+qqnorm(resid.bill1) # plotting residuals for visual test of normality
+qqline(resid.bill1)
+shapiro.test(resid.bill1)
+hist(resid.bill1)
+boxplot(resid.bill1~birbs.reduced$Strategy)
+
+cochran.test(bill.fit1, data = birbs.reduced)
+
+emmeans(bill.fit1, pairwise~Strategy)
+```
+
+Bill plot:
+```{r}
+billplot<-ggplot(aes(x=Strategy, y=billMillimeters), data = birbs.reduced)+
+  geom_boxplot() +
+   geom_jitter(shape=16, position=position_jitter(0.2)) +
+  scale_x_discrete((name = "Movement strategy"),labels=c("Tidal strategy","Sunrise/Sunset strategy","Mixed strategy"))+
+  labs(y="Bill length (mm)") +
+  theme_classic(base_size = 15) 
+  #geom_hline(yintercept=19, color="chartreuse4")
+billplot
+```
+
+
+
+Metabolite Analyses:
+```{r}
+all.birbs<-read.csv("2019-2020 Brazil Banding.csv")
+```
+
+Plasma T analysis:
+```{r}
+
+Plasma.T.birbs<-birbs.reduced %>%
+  filter(Plasma.Value > 0)
+
+Plasma.T.birbs$log.val<-log10(Plasma.T.birbs$Plasma.Value)
+
+all.birbs$Year<-as.factor(all.birbs$Year)
+
+
+all.birbs.PT<-all.birbs %>%
+  filter(Plasma.T.Val >0)
+
+all.birbs.PT$log.val<-log10(all.birbs.PT$Plasma.T.Val)
+```
+
+Tagged bird TRIG model:
+```{r}
+birbs1PT.fit <- lm(log.val~ Strategy*utcYearStart, data=Plasma.T.birbs) # model for 2-way anova
+
+Anova(birbs1PT.fit, type="II") # generates a typical summary 
+emmeans(birbs1PT.fit, pairwise ~ Strategy)
+
+cochran.test(birbs1PT.fit, data = Plasma.T.birbs)
+
+resid.anova.PT=resid(birbs1PT.fit) # generating residuals
+
+qqnorm(resid.anova.PT) # plotting residuals for visual test of normality
+qqline(resid.anova.PT)
+shapiro.test(resid.anova.PT)
+hist(resid.anova.PT)
+boxplot(resid.anova.PT~Plasma.T.birbs$Strategy)
+```
+
+All bird TRIG model:
+```{r}
+plasmaTSAM.fit <- lm(log.val~Year+Time.Sample, data=all.birbs.PT) # model for 2-way anova
+
+Anova(plasmaTSAM.fit, type="II") # generates a typical summary of the output
+
+
+
+resid.anova.PT.all=resid(plasmaTSAM.fit) # generating residuals
+
+qqnorm(resid.anova.PT.all) # plotting residuals for visual test of normality
+qqline(resid.anova.PT.all)
+shapiro.test(resid.anova.PT.all)
+hist(resid.anova.PT.all)
+boxplot(resid.anova.PT.all~all.birbs.PT$Time.Sample)
+
+leveneTest (resid.anova.PT.all~all.birbs.PT$Time.Sample) #HoV test, normality will follow after once we get residuals
+cochran.test(plasmaTSAM.fit, data = all.birbs.PT)
+```
+
+```{r}
+
+all.birbs$Year<- as.factor(all.birbs$Year)
+
+all.birbs$Size.Adjusted.Mass<-(all.birbs$Weight..g./(all.birbs$Wing..mm.^3))*10000
+
+weight.birds<-all.birbs %>%
+  filter(Weight..g.>0)
+```
+
+test w/ Size Adjusted Mass as Dependent Var:
+```{r}
+
+weight.fit<- lm(Size.Adjusted.Mass~Year+Time.Sample, data=weight.birds) # model for 2-way anova
+
+Anova(weight.fit, type="II") # generates a typical summary of the output
+
+
+resid.weight=resid(weight.fit) # generating residuals
+
+qqnorm(resid.weight) # plotting residuals for visual test of normality
+qqline(resid.weight)
+shapiro.test(resid.weight)
+hist(resid.weight)
+boxplot(resid.weight~weight.birds$Time.Sample)
+
+boxplot(weight.birds$Size.Adjusted.Mass~weight.birds$Time.Sample+weight.birds$Year)
+
+cochran.test(weight.fit, data = weight.birds)
+```
+
+
+Behavior Analyses:
+
+```{r}
+feedcombo<-read.csv("Brazil Scan Sample 19_20combined.csv")
+```
+
+```{r}
+feedcombo$logitfeeding<-logit(feedcombo$Feeding)
+```
+
+PERMANOVA:
+```{r} 
+behaviors<-feedcombo %>%
+  dplyr::select(Rest, Preen, Locomotion, Peck, Probe, Skim)
+
+behaviors19<-feedcombo %>%
+  dplyr::filter(Year==2019) %>%
+  dplyr::select(Rest, Preen, Locomotion, Peck, Probe, Skim)
+
+feedcombo19<-feedcombo %>%
+  dplyr::filter(Year==2019)
+
+behaviors20<-feedcombo %>%
+  dplyr::filter(Year==2020) %>%
+  dplyr::select(Rest, Preen, Locomotion, Peck, Probe, Skim)
+
+feedcombo20<-feedcombo %>%
+  dplyr::filter(Year==2020)
+
+
+vegan::adonis(behaviors~ Site*Year, data= feedcombo,  permutations=999, na.rm=TRUE)
+adonis(behaviors20 ~ Site, data= feedcombo20,  permutations=999)
+adonis(behaviors19 ~ Site, data= feedcombo19,  permutations=999)
+```
+
+canonical analyses and permdisp:
+```{r}
+canonanalysis1<- simper(behaviors, feedcombo$Site)
+summary(canonanalysis1, ordered = TRUE, permutations=999)
+
+canonanalysis2<- simper(behaviors19, feedcombo19$Site)
+summary(canonanalysis2, ordered = TRUE, permutations=999)
+
+canonanalysis3<- simper(behaviors20, feedcombo20$Site)
+summary(canonanalysis3, ordered = TRUE, permutations=999)
+
+
+dist.beh <- vegdist(behaviors) #creates bray-curtis values for the species across all observations
+test1<- anova(betadisper(dist.beh,feedcombo$Site)) #now looking at the differences in the distance values for sites
+test1
+
+```
+
+linear model-logit feeding:
+```{r}
+feedcombo$Year<-as.factor(feedcombo$Year)
+
+
+feed.mod<-lm(logitfeeding ~ Year+Site+doy, data=feedcombo)
+Anova(feed.mod)
+
+cochran.test(feed.mod, data = feedcombo)
+leveneTest(feedcombo$asinfeeding~feedcombo$Site)
+
+resid.anovasfeed=resid(feed.mod) # generating residuals
+
+qqnorm(resid.anovasfeed) # plotting residuals for visual test of normality
+qqline(resid.anovasfeed)
+shapiro.test(resid.anovasfeed)
+hist(resid.anovasfeed)
+boxplot(resid.anovasfeed~feedcombo$Site)
+
+emmeans(feed.mod, pairwise ~ Site)
+plot(asinfeeding~doy, data=feedcombo)
+```
+
+feeding plot:
+```{r}
+feedcombo$Year<-as.factor(feedcombo$Year)
+
+feedingplotregcolor <- ggplot(feedcombo, aes(x=Site, y=Feeding, fill=Year)) +
+  geom_boxplot() +
+  theme_classic() +
+  scale_x_discrete(limits=c("ISAL","ITFL"), labels=c("Salinas","Tidal Flats")) +
+  scale_fill_brewer(labels=c("2019","2020"),palette = "Paired") +
+  labs(y="Proportion of Time Spent Foraging")
+
+feedingplotregcolor
+```
+
+NMDS PLots:
+```{r}
+behaviorall19<-feedcombo19 %>%
+  dplyr::select(Peck,Probe,Skim,Rest,Preen,Locomotion)
+
+
+NMDS<- metaMDS(behaviorall19)
+```
+
+```{r}
+feedcombo19$Site<-as.factor(feedcombo19$Site)
+locations<-data.frame(feedcombo19[,1])
+names(locations)=""
+locs1<-envfit(NMDS, env=locations)
+behs1 <-envfit(NMDS, behaviorall19)
+par(mfrow=c(1,1))
+plot(NMDS, type="n")
+points(NMDS,display="sites", cex = 0.8, pch=21, col="black", bg="orange")
+#text(NMDS, display = "spec", cex=0.7, col="blue")
+plot(locs1)
+plot(behs1, col="black", cex=0.8)
+ordihull(NMDS,groups= locations$Site,draw="lines",lty=3, col="gray60", label=F)
+```
+
+prep for ggplot:
+
+```{r}
+bird.NMDS.data<-locations
+bird.NMDS.data$NMDS1<-NMDS$points[ ,1] #this puts the NMDS scores for the plots into a new dataframe. you could put them into an existing one if you preferred.
+bird.NMDS.data$NMDS2<-NMDS$points[ ,2] 
+
+colnames(bird.NMDS.data)<- c("Site","NMDS1","NMDS2")
+
+stems<-colSums(behaviorall19) #total abundances for each species
+spps <- data.frame(vegan::scores(NMDS, display = "species")) #dataframe of species scores for plotting
+spps$species <- row.names(spps) # making a column with species names
+spps$colsums <- stems #adding the colSums from above
+spps.colmedian <- median(spps$colsums) #create an object that is the median of the abundance of the measured species
+spps.colmean <- mean(spps$colsums) #creates a mean instead if you wish to use
+spps2 <- subset(spps,spps$colsums > spps.colmean) #select the most abundant species. Could discard fewer by going something like - spps$colsums>(spps.colmedian/2) instead
+spps2$species <- factor(spps2$species) #otherwise factor doesn't drop unused levels and it will throw an error
+ 
+env.scores.bird <- as.data.frame(vegan::scores(locs1, display = "factors")) #extracts relevant scores from envifit
+env.scores.bird <- cbind(env.scores.bird, env.variables = rownames(env.scores.bird)) #and then gives them their names
+
+env.scores.beh <- as.data.frame(vegan::scores(behs1, display = "vectors")) #extracts relevant scores from envifit
+env.scores.beh <- cbind(env.scores.beh, env.variables = rownames(env.scores.beh)) #and then gives them their names
+
+#data for ellipse, in this case using the management factor
+df_ell.bird.Site <- data.frame() #sets up a data frame before running the function.
+
+veganCovEllipse <- function (cov, center = c(0, 0), scale = 1, npoints = 100) 
+{
+  theta <- (0:npoints) * 2 * pi/npoints
+  Circle <- cbind(cos(theta), sin(theta))
+  t(center + scale * t(Circle %*% chol(cov)))
+}
+
+
+for(ITFL in levels(bird.NMDS.data$Site)){
+  df_ell.bird.Site <- rbind(df_ell.bird.Site, cbind(as.data.frame(with(bird.NMDS.data [bird.NMDS.data$Site==ITFL,],
+                                                         veganCovEllipse(cov.wt(cbind(NMDS1,NMDS2),wt=rep(1/length(NMDS1),length(NMDS1)))$cov,center=c(mean(NMDS1),mean(NMDS2))))),Site=ITFL))
+}
+ 
+
+ 
+# data for labelling the ellipse
+NMDS.mean.bird=aggregate(bird.NMDS.data[ ,c("NMDS1", "NMDS2")], 
+                         list(group = bird.NMDS.data$Site), mean)
+ 
+# data for labelling the ellipse
+NMDS.mean=aggregate(bird.NMDS.data[,c("NMDS1", "NMDS2")], 
+                    list(group = bird.NMDS.data$Site), mean)
+ 
+```
+
+ggplot:
+```{r}
+mult <- 2 #multiplier for the arrows and text for envfit below. You can change this and then rerun the plot command.
+levels(bird.NMDS.data$Site) <- c("Salinas", "Tidal Flats")
+levels(df_ell.bird.Site$Site) <- c("Salinas", "Tidal Flats")
+df_ell.bird.Site[df_ell.bird.Site == "ISAL"] <- "Salinas"
+df_ell.bird.Site[df_ell.bird.Site == "ITFL"] <- "Tidal Flats"
+bird.nmds.gg1 <- ggplot(data = bird.NMDS.data, aes(y = NMDS2, x = NMDS1))+ #sets up the plot. brackets around the entire thing to make it draw automatically
+    geom_path(data = df_ell.bird.Site, aes(x = NMDS1, y = NMDS2, group = Site, color=Site))+ #this is the ellipse, seperate ones by Site. If you didn't change the "alpha" (the shade) then you need to keep the "group 
+    scale_alpha_manual(guide = FALSE,values=c(0.3, 0.5, 0.7, 0.9))+ #sets the shade for the ellipse
+    geom_point(aes(color=Site), size = 3) + #puts the site points in from the ordination, shape determined by site, size refers to size of point
+    #geom_text(data=spps2, aes(x=spps2$NMDS1, y=spps2$NMDS2, label=species), size = 3.3, hjust=1.1)+ #labelling the species. hjust used to shift them slightly from their points
+    geom_segment(data = env.scores.beh,
+                 aes(x = 0, xend = mult*NMDS1, y = 0, yend = mult*NMDS2),
+                 arrow = arrow(length = unit(0.25, "cm")), colour = "grey") + #arrows for envfit.  doubled the length for similarity to the plot() function. NB check ?envfit regarding arrow length if not familiar with lengths
+    geom_text(data = env.scores.beh, #labels the environmental variable arrows * "mult" as for the arrows
+              aes(x = mult*NMDS1, y = mult*NMDS2, label=env.variables),
+              size = 5,
+              hjust = .5)+
+    #geom_point(data=spps2, alpha = .6, shape = 4)+ #these are the species points, made lighter and a specific shape
+    #scale_shape_manual(values = c(16,16))+ #sets the shape of the plot points instead of using whatever ggplot2 automatically provides
+    
+    coord_cartesian(xlim = c(-2,2))+  ## NB this changes the visible area of the plot only (this is a good thing, apparently). Can also specify ylim. Here in case you want to set xaxis manually.
+    theme_classic()
+bird.nmds.gg1.final<-bird.nmds.gg1+theme(axis.title = element_text(size = rel(1.5)), axis.text = element_text(color="black", size = 15)) + theme(axis.line = element_line(color="black", size =1)) + theme(legend.title=element_text(size=15), 
+    legend.text=element_text(size=15))+ scale_color_manual(values=c("goldenrod1","dodgerblue"))
+ 
+bird.nmds.gg1.final
+```
+
+2020:
+```{r}
+behaviorall20<-feedcombo20 %>%
+  dplyr::select(Peck,Probe,Skim,Rest,Preen,Locomotion)
+
+
+NMDS1<- metaMDS(behaviorall20)
+```
+
+```{r}
+feedcombo20$Site<-as.factor(feedcombo20$Site)
+locations<-data.frame(feedcombo20[,1])
+names(locations)=""
+locs1<-envfit(NMDS1, env=locations)
+behs1 <-envfit(NMDS1, behaviorall20)
+par(mfrow=c(1,1))
+plot(NMDS, type="n")
+points(NMDS,display="sites", cex = 0.8, pch=21, col="black", bg="orange")
+#text(NMDS, display = "spec", cex=0.7, col="blue")
+plot(locs1)
+plot(behs1, col="black", cex=0.8)
+ordihull(NMDS,groups= locations$Site,draw="lines",lty=3, col="gray60", label=F)
+```
+
+```{r}
+bird.NMDS.data<-locations
+bird.NMDS.data$NMDS1<-NMDS$points[ ,1] #this puts the NMDS scores for the plots into a new dataframe. you could put them into an existing one if you preferred.
+bird.NMDS.data$NMDS2<-NMDS$points[ ,2] 
+
+colnames(bird.NMDS.data)<- c("Site","NMDS1","NMDS2")
+
+stems<-colSums(behaviorall20) #total abundances for each species
+spps <- data.frame(vegan::scores(NMDS, display = "species")) #dataframe of species scores for plotting
+spps$species <- row.names(spps) # making a column with species names
+spps$colsums <- stems #adding the colSums from above
+spps.colmedian <- median(spps$colsums) #create an object that is the median of the abundance of the measured species
+spps.colmean <- mean(spps$colsums) #creates a mean instead if you wish to use
+spps2 <- subset(spps,spps$colsums > spps.colmean) #select the most abundant species. Could discard fewer by going something like - spps$colsums>(spps.colmedian/2) instead
+spps2$species <- factor(spps2$species) #otherwise factor doesn't drop unused levels and it will throw an error
+ 
+env.scores.bird <- as.data.frame(vegan::scores(locs1, display = "factors")) #extracts relevant scores from envifit
+env.scores.bird <- cbind(env.scores.bird, env.variables = rownames(env.scores.bird)) #and then gives them their names
+
+env.scores.beh <- as.data.frame(vegan::scores(behs1, display = "vectors")) #extracts relevant scores from envifit
+env.scores.beh <- cbind(env.scores.beh, env.variables = rownames(env.scores.beh)) #and then gives them their names
+
+#data for ellipse, in this case using the management factor
+df_ell.bird.Site <- data.frame() #sets up a data frame before running the function.
+
+veganCovEllipse <- function (cov, center = c(0, 0), scale = 1, npoints = 100) 
+{
+  theta <- (0:npoints) * 2 * pi/npoints
+  Circle <- cbind(cos(theta), sin(theta))
+  t(center + scale * t(Circle %*% chol(cov)))
+}
+
+
+for(ITFL in levels(bird.NMDS.data$Site)){
+  df_ell.bird.Site <- rbind(df_ell.bird.Site, cbind(as.data.frame(with(bird.NMDS.data [bird.NMDS.data$Site==ITFL,],
+                                                         veganCovEllipse(cov.wt(cbind(NMDS1,NMDS2),wt=rep(1/length(NMDS1),length(NMDS1)))$cov,center=c(mean(NMDS1),mean(NMDS2))))),Site=ITFL))
+}
+ 
+
+ 
+# data for labelling the ellipse
+NMDS.mean.bird=aggregate(bird.NMDS.data[ ,c("NMDS1", "NMDS2")], 
+                         list(group = bird.NMDS.data$Site), mean)
+ 
+# data for labelling the ellipse
+NMDS.mean=aggregate(bird.NMDS.data[,c("NMDS1", "NMDS2")], 
+                    list(group = bird.NMDS.data$Site), mean)
+ 
+```
+
+ggplot:
+```{r}
+mult <- 2 #multiplier for the arrows and text for envfit below. You can change this and then rerun the plot command.
+levels(bird.NMDS.data$Site) <- c("Salinas", "Tidal Flats")
+levels(df_ell.bird.Site$Site) <- c("Salinas", "Tidal Flats")
+df_ell.bird.Site[df_ell.bird.Site == "ISAL"] <- "Salinas"
+df_ell.bird.Site[df_ell.bird.Site == "ITFL"] <- "Tidal Flats"
+bird.nmds.gg2<- ggplot(data = bird.NMDS.data, aes(y = NMDS2, x = NMDS1))+ #sets up the plot. brackets around the entire thing to make it draw automatically
+    geom_path(data = df_ell.bird.Site, aes(x = NMDS1, y = NMDS2, group = Site, color=Site))+ #this is the ellipse, seperate ones by Site. If you didn't change the "alpha" (the shade) then you need to keep the "group 
+    scale_alpha_manual(guide = FALSE,values=c(0.3, 0.5, 0.7, 0.9))+ #sets the shade for the ellipse
+    geom_point(aes(color=Site), size = 3) + #puts the site points in from the ordination, shape determined by site, size refers to size of point
+    #geom_text(data=spps2, aes(x=spps2$NMDS1, y=spps2$NMDS2, label=species), size = 3.3, hjust=1.1)+ #labelling the species. hjust used to shift them slightly from their points
+    geom_segment(data = env.scores.beh,
+                 aes(x = 0, xend = mult*NMDS1, y = 0, yend = mult*NMDS2),
+                 arrow = arrow(length = unit(0.25, "cm")), colour = "grey") + #arrows for envfit.  doubled the length for similarity to the plot() function. NB check ?envfit regarding arrow length if not familiar with lengths
+    geom_text(data = env.scores.beh, #labels the environmental variable arrows * "mult" as for the arrows
+              aes(x = mult*NMDS1, y = mult*NMDS2, label=env.variables),
+              size = 5,
+              hjust = .5)+
+    #geom_point(data=spps2, alpha = .6, shape = 4)+ #these are the species points, made lighter and a specific shape
+    #scale_shape_manual(values = c(16,16))+ #sets the shape of the plot points instead of using whatever ggplot2 automatically provides
+    
+    coord_cartesian(xlim = c(-2,2))+  ## NB this changes the visible area of the plot only (this is a good thing, apparently). Can also specify ylim. Here in case you want to set xaxis manually.
+    theme_classic()
+bird.nmds.gg2.final<-bird.nmds.gg2+theme(axis.title = element_text(size = rel(1.5)), axis.text = element_text(color="black", size = 15)) + theme(axis.line = element_line(color="black", size =1)) + theme(legend.title=element_text(size=15), 
+    legend.text=element_text(size=15))+ scale_color_manual(values=c("goldenrod1","dodgerblue"))
+ 
+bird.nmds.gg2.final
+```
+
+combined plot:
+```{r}
+library(ggpubr)
+
+combinedNMDS <- ggarrange(bird.nmds.gg1.final, bird.nmds.gg2.final,
+                    labels = c("2019", "2020"),
+                    hjust = -1.5,
+                    ncol = 1, 
+                    common.legend = TRUE ,
+                    legend = "right")
+combinedNMDS + theme_classic(base_size = 12)
+```
+
+
+
